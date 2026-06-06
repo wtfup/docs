@@ -29,6 +29,12 @@
             ]
           },
           {
+            "group": "Integrations",
+            "pages": [
+              "guides/google-workspace-sdk"
+            ]
+          },
+          {
             "group": "Writing content",
             "pages": [
               "essentials/markdown",

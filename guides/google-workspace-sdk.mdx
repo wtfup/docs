@@ -1,0 +1,208 @@
+---
+title: "Google Workspace SDK setup"
+description: "Set up programmatic access across Gmail, Drive, Calendar, and the rest of Google Workspace"
+---
+
+This guide walks you through setting up the Google Workspace APIs so an application or service can read and write across **Gmail, Drive, Calendar, Docs, Sheets, and Admin** on behalf of your users.
+
+There are two ways to authenticate, and choosing the right one is the most important decision:
+
+<CardGroup cols={2}>
+  <Card title="OAuth 2.0 (user consent)" icon="user-check">
+    Each user signs in and grants access to **their own** account. Best for apps where individuals connect their personal Workspace data.
+  </Card>
+  <Card title="Service account + domain-wide delegation" icon="building-lock">
+    A single service account impersonates **any user** in your Workspace domain — no per-user consent. Best for internal automation and backends that act org-wide.
+  </Card>
+</CardGroup>
+
+<Note>
+  To "access anything across the whole organization" without each user clicking *Allow*, you want a **service account with domain-wide delegation**. It requires Workspace **super admin** access to authorize.
+</Note>
+
+## Prerequisites
+
+- A Google Cloud project (or permission to create one)
+- For domain-wide delegation: **super admin** access to the Google Workspace Admin console
+- Node.js 18+ (examples below use the official `googleapis` Node SDK)
+
+## Step 1: Create a Google Cloud project
+
+<Steps>
+  <Step title="Create the project">
+    Open the [Google Cloud console](https://console.cloud.google.com/projectcreate) and create a project, e.g. `wtf-workspace-integration`.
+  </Step>
+  <Step title="Note the project ID">
+    You'll reference the project ID when creating credentials and configuring the SDK.
+  </Step>
+</Steps>
+
+## Step 2: Enable the Workspace APIs
+
+In **APIs & Services → Library**, enable each API you need:
+
+| Workspace product | API to enable |
+| ----------------- | ------------- |
+| Gmail             | Gmail API |
+| Drive             | Google Drive API |
+| Calendar          | Google Calendar API |
+| Docs              | Google Docs API |
+| Sheets            | Google Sheets API |
+| Contacts          | People API |
+| User/org admin    | Admin SDK API |
+
+<Tip>
+  Enable only the APIs you actually use. You can always add more later without re-doing auth.
+</Tip>
+
+## Step 3: Choose and configure authentication
+
+<Tabs>
+  <Tab title="Service account (org-wide)">
+    Use this for backends and automation that act across your domain.
+
+    <Steps>
+      <Step title="Create the service account">
+        Go to **IAM & Admin → Service Accounts → Create service account**. Give it a name like `workspace-bot` and create it.
+      </Step>
+      <Step title="Create a JSON key">
+        Open the service account → **Keys → Add key → Create new key → JSON**. Download the file and store it as a secret — **never commit it to git**.
+      </Step>
+      <Step title="Enable domain-wide delegation">
+        On the service account, enable **domain-wide delegation** and copy its **Client ID** (a long number).
+      </Step>
+      <Step title="Authorize scopes in the Admin console">
+        In the [Admin console](https://admin.google.com) go to **Security → Access and data control → API controls → Domain-wide delegation → Add new**. Paste the **Client ID** and the exact OAuth scopes you need (see Step 4). This step requires a super admin.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="OAuth 2.0 (per user)">
+    Use this when individual users connect their own accounts.
+
+    <Steps>
+      <Step title="Configure the consent screen">
+        Go to **APIs & Services → OAuth consent screen**. Choose **Internal** (only your Workspace users) or **External**, and add the scopes you need.
+      </Step>
+      <Step title="Create OAuth client credentials">
+        Go to **Credentials → Create credentials → OAuth client ID**. Pick the app type (Web application for most server apps) and add your authorized redirect URIs.
+      </Step>
+      <Step title="Store client ID and secret">
+        Save the generated **client ID** and **client secret** as secrets in your app.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Step 4: Pick your OAuth scopes
+
+Scopes define exactly what your integration can touch. Request the narrowest set that works.
+
+| Access | Scope |
+| ------ | ----- |
+| Read Gmail | `https://www.googleapis.com/auth/gmail.readonly` |
+| Send/modify Gmail | `https://mail.google.com/` |
+| Read/write Drive | `https://www.googleapis.com/auth/drive` |
+| Read/write Calendar | `https://www.googleapis.com/auth/calendar` |
+| Read/write Sheets | `https://www.googleapis.com/auth/spreadsheets` |
+| Read directory users | `https://www.googleapis.com/auth/admin.directory.user.readonly` |
+
+<Warning>
+  For domain-wide delegation, the scopes you request in code **must exactly match** the scopes you authorized in the Admin console, or calls fail with `unauthorized_client`.
+</Warning>
+
+## Step 5: Install the SDK and authenticate
+
+```bash
+npm install googleapis
+```
+
+<CodeGroup>
+
+```js Service account (impersonation)
+import { google } from "googleapis";
+
+// Load the JSON key from a secret/env var — do NOT hardcode it.
+const auth = new google.auth.GoogleAuth({
+  keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+  scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+  // The Workspace user to impersonate (domain-wide delegation):
+  clientOptions: { subject: "user@your-domain.com" },
+});
+
+const gmail = google.gmail({ version: "v1", auth });
+
+const res = await gmail.users.messages.list({ userId: "me", maxResults: 5 });
+console.log(res.data.messages);
+```
+
+```js OAuth 2.0 (per user)
+import { google } from "googleapis";
+
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI,
+);
+
+// 1. Send the user here to grant access:
+const url = oauth2Client.generateAuthUrl({
+  access_type: "offline", // returns a refresh token
+  scope: ["https://www.googleapis.com/auth/gmail.readonly"],
+});
+
+// 2. After redirect, exchange the code for tokens:
+const { tokens } = await oauth2Client.getToken(codeFromRedirect);
+oauth2Client.setCredentials(tokens); // persist tokens.refresh_token
+
+const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+```
+
+</CodeGroup>
+
+## Step 6: Verify access
+
+A quick smoke test that you can reach multiple Workspace services:
+
+```js
+const drive = google.drive({ version: "v3", auth });
+const files = await drive.files.list({ pageSize: 5, fields: "files(id, name)" });
+console.log(files.data.files);
+
+const calendar = google.calendar({ version: "v3", auth });
+const events = await calendar.events.list({ calendarId: "primary", maxResults: 5 });
+console.log(events.data.items);
+```
+
+## Security checklist
+
+<AccordionGroup>
+  <Accordion icon="key" title="Never commit credentials">
+    Keep service-account JSON keys and OAuth secrets out of git. Load them from environment variables or a secrets manager. Add the key file path to `.gitignore`.
+  </Accordion>
+  <Accordion icon="shield-halved" title="Use least-privilege scopes">
+    Request read-only scopes unless you need to write. Narrow scopes limit blast radius if a credential leaks.
+  </Accordion>
+  <Accordion icon="rotate" title="Rotate keys regularly">
+    Rotate service-account keys and revoke unused OAuth tokens. Prefer short-lived credentials where possible.
+  </Accordion>
+  <Accordion icon="user-shield" title="Scope impersonation tightly">
+    With domain-wide delegation a single key can act as any user. Restrict who can deploy with it and audit usage via the Admin console logs.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Gmail API reference" icon="envelope" href="https://developers.google.com/gmail/api/reference/rest">
+    Full Gmail REST API surface.
+  </Card>
+  <Card title="Drive API reference" icon="folder" href="https://developers.google.com/drive/api/reference/rest/v3">
+    Full Drive REST API surface.
+  </Card>
+  <Card title="Node.js client" icon="node-js" href="https://github.com/googleapis/google-api-nodejs-client">
+    The `googleapis` SDK used in this guide.
+  </Card>
+  <Card title="Domain-wide delegation" icon="building-lock" href="https://developers.google.com/workspace/guides/create-credentials#optional_set_up_domain-wide_delegation_for_a_service_account">
+    Official setup reference for org-wide access.
+  </Card>
+</CardGroup>
